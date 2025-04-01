@@ -130,10 +130,11 @@ class GenericCommandsMixin:
     def move(self, key: CommandItem, db: int) -> int:
         if db == self._db_num:
             raise SimpleError(msgs.SRC_DST_SAME_MSG)
-        if not key or key.key in self._server.dbs[db]:
+        if not key or key.key in self._server.get_db(db):
             return 0
         # TODO: what is the interaction with expiry?
-        self._server.dbs[db][key.key] = self._server.dbs[self._db_num][key.key]
+        dest_db = self._server.get_db(db)
+        dest_db[key.key] = self._db[key.key]
         key.value = None  # Causes deletion
         return 1
 
@@ -385,3 +386,23 @@ class GenericCommandsMixin:
     @command(name="UNLINK", fixed=(Key(),), repeat=(Key(),))
     def unlink(self, *keys: CommandItem) -> int:
         return delete_keys(*keys)
+
+    @command(name="COPY", fixed=(Key(), Key(), DbIndex, bool))
+    def copy(self, source: CommandItem, destination: str, db: Optional[int] = None, replace: bool = False) -> int:
+        """
+        Copies source key to destination. supports cross database copy
+        """
+        if not source:
+            return 0
+
+        if db is None:
+            destination_db = self._db
+        else:
+            destination_db = self._server.get_db(db)
+
+        dest_key = destination.encode()
+        if not replace and dest_key in destination_db:
+            return 0
+
+        destination_db[dest_key] = self._db[source.key]
+        return 1

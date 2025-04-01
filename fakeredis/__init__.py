@@ -20,6 +20,15 @@ else:
         def __init__(self, *args, **kwargs):
             raise NotImplementedError("TcpFakeServer is only available in Python 3.11+")
 
+# Configure storage for FakeRedis
+def configure_storage(storage_dir=None):
+    """
+    Configure file-based JSON storage for FakeRedis
+    
+    Args:
+        storage_dir: Directory to store JSON files. If None, uses a temporary directory.
+    """
+    FakeServer.configure_storage(storage_dir)
 
 try:
     from importlib import metadata
@@ -44,4 +53,5 @@ __all__ = [
     "FakeValkey",
     "FakeAsyncValkey",
     "FakeStrictValkey",
+    "configure_storage",
 ]

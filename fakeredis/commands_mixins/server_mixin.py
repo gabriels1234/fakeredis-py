@@ -62,12 +62,12 @@ class ServerCommandsMixin:
         now_us %= 1_000_000
         return [str(now_s).encode(), str(now_us).encode()]
 
-    @command((DbIndex, DbIndex))
-    def swapdb(self, index1: int, index2: int) -> SimpleString:
-        if index1 != index2:
-            db1 = self._server.dbs[index1]
-            db2 = self._server.dbs[index2]
-            db1.swap(db2)
+    @command(name="SWAPDB", fixed=(DbIndex, DbIndex))
+    def swapdb(self, index1: DbIndex, index2: DbIndex) -> SimpleString:
+        """Swaps two Redis databases"""
+        db1 = self._server.get_db(index1)
+        db2 = self._server.get_db(index2)
+        db1.swap(db2)
         return OK
 
     @command(name="COMMAND INFO", fixed=(), repeat=(bytes,))

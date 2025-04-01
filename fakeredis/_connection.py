@@ -121,14 +121,30 @@ class FakeRedisMixin:
         version: VersionType = (7,),
         server_type: str = "redis",
         lua_modules: Optional[Set[str]] = None,
+        persistence_enabled: bool = False,
+        storage_dir: Optional[str] = None,
         **kwargs: Any,
     ) -> None:
+        # Setup storage if persistence is enabled
+        if persistence_enabled:
+            # Configure storage with the provided directory if specified
+            FakeServer.configure_storage(storage_dir)
+        
         # Interpret the positional and keyword arguments according to the
         # version of redis in use.
         parameters = list(inspect.signature(redis.Redis.__init__).parameters.values())[1:]
         # Convert args => kwargs
         kwargs.update({parameters[i].name: args[i] for i in range(len(args))})
-        kwargs.setdefault("host", uuid.uuid4().hex)
+        
+        # For persistence, use a fixed hostname to ensure we get the same server
+        if persistence_enabled:
+            # If specific storage_dir is provided, add it to the key to ensure
+            # we have separate servers per storage directory
+            persistent_host = f"fakeredis-persistent-{storage_dir}" if storage_dir else "fakeredis-persistent"
+            kwargs.setdefault("host", persistent_host)
+        else:
+            kwargs.setdefault("host", uuid.uuid4().hex)
+            
         kwds = {
             p.name: kwargs.get(p.name, p.default)
             for ind, p in enumerate(parameters)

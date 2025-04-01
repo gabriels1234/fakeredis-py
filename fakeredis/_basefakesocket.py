@@ -2,11 +2,26 @@ import itertools
 import queue
 import time
 import weakref
-from typing import List, Any, Tuple, Optional, Callable, Union, Match, AnyStr, Generator, Dict
+from typing import List, Any, Tuple, Optional, Callable, Union, Match, AnyStr, Generator, Dict, Set
 from xmlrpc.client import ResponseError
 
-import redis
-from redis.connection import DefaultParser
+# Forward reference for type hints
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from fakeredis._server import FakeServer
+
+# Local imports
+try:
+    import redis
+    from redis.connection import DefaultParser
+except ImportError:
+    redis = None  # type: ignore
+    DefaultParser = None  # type: ignore
+
+try:
+    from redis.exceptions import ExecAbortError
+except ImportError:
+    ExecAbortError = Exception  # type: ignore
 
 from fakeredis.model import XStream, ZSet, Hash, ExpiringMembersSet
 from . import _msgs as msgs
@@ -21,7 +36,16 @@ from ._helpers import (
     compile_pattern,
     QUEUED,
     decode_command_bytes,
+    OK,
+    BGSAVE_STARTED,
 )
+
+# Command type for transaction handling
+class _Command:
+    def __init__(self, callback, args=None, kwargs=None):
+        self.callback = callback
+        self.args = args or []
+        self.kwargs = kwargs or {}
 
 
 def _extract_command(fields: List[bytes]) -> Tuple[Any, List[Any]]:
@@ -67,27 +91,35 @@ class BaseFakeSocket:
     }
     _connection_error_class = redis.ConnectionError
 
-    def __init__(self, server: "FakeServer", db: int, *args: Any, **kwargs: Any) -> None:  # type: ignore # noqa: F821
-        super(BaseFakeSocket, self).__init__(*args, **kwargs)
-        from fakeredis import FakeServer
-
-        self._server: FakeServer = server
+    def __init__(
+        self,
+        server: "FakeServer",
+        db: int = 0,
+        password: Optional[bytes] = None,
+        lua_modules: Optional[Set[str]] = None,
+        client_info: Dict[str, Any] = None
+    ) -> None:
+        self.responses = queue.Queue()
+        self._in_transaction = False
+        self._transaction_commands: List[_Command] = []
+        self._transaction_transformers: Dict[Callable[[], None], Callable[[List[Any]], List[Any]]] = {}
+        self._server = server
         self._db_num = db
-        self._db = server.dbs[self._db_num]
-        self.responses: Optional[queue.Queue[bytes]] = queue.Queue()
+        self._db = server.get_db(self._db_num)
         # Prevents parser from processing commands. Not used in this module,
         # but set by aioredis module to prevent new commands being processed
-        # while handling a blocking command.
-        self._paused = False
+        self.is_paused = False
         self._parser = self._parse_commands()
         self._parser.send(None)
         # Assigned elsewhere
-        self._transaction: Optional[List[Any]]
-        self._in_transaction: bool
-        self._pubsub: int
-        self._transaction_failed: bool
-        info = kwargs.pop("client_info", dict(user="default"))
-        self._client_info: Dict[str, Union[str, int]] = {k.replace("_", "-"): v for k, v in info.items()}
+        self._transaction = None
+        self._watches = set()
+        self._pubsub = 0
+        self._transaction_failed = False
+        self._watch_notified = False
+        if client_info is None:
+            client_info = dict(user="default")
+        self._client_info: Dict[str, Union[str, int]] = {k.replace("_", "-"): v for k, v in client_info.items()}
 
     @property
     def client_info(self) -> bytes:
@@ -122,10 +154,10 @@ class BaseFakeSocket:
             responses.put(msg)
 
     def pause(self) -> None:
-        self._paused = True
+        self.is_paused = True
 
     def resume(self) -> None:
-        self._paused = False
+        self.is_paused = False
         self._parser.send(b"")
 
     def shutdown(self, _: Any) -> None:
@@ -149,6 +181,14 @@ class BaseFakeSocket:
         for subs in server.psubscribers.values():
             subs.discard(self)
         self._clear_watches()
+
+    def _clear_watches(self) -> None:
+        """Clear all watches and remove this socket from watched keys."""
+        if hasattr(self, '_watch_notified'):
+            self._watch_notified = False
+        while hasattr(self, '_watches') and self._watches:
+            (key, db) = self._watches.pop()
+            db.remove_watch(key, self)
 
     def close(self) -> None:
         # Mark ourselves for cleanup. This might be called from
@@ -177,7 +217,7 @@ class BaseFakeSocket:
         """
         buf = b""
         while True:
-            while self._paused or b"\n" not in buf:
+            while self.is_paused or b"\n" not in buf:
                 buf += yield
             line, buf = self._extract_line(buf)
             assert line[:1] == b"*"  # array
@@ -416,3 +456,7 @@ class BaseFakeSocket:
             return SimpleString(b"stream")
         else:
             assert False  # pragma: nocover
+
+    def notify_watch(self) -> None:
+        """Mark this socket as having had one of its WATCHed keys modified."""
+        self._watch_notified = True

@@ -127,17 +127,35 @@ def compile_pattern(pattern_bytes: bytes) -> re.Pattern:  # type: ignore
 
 
 class Database(MutableMapping):  # type: ignore
-    def __init__(self, lock: Optional[threading.Lock], *args: Any, **kwargs: Any) -> None:
+    def __init__(self, lock: Optional[threading.Lock], *args: Any, storage=None, server_id=None, db_num=None, **kwargs: Any) -> None:
         self._dict: Dict[bytes, Any] = dict(*args, **kwargs)
         self.time = 0.0
         # key to the set of connections
         self._watches: Dict[bytes, weakref.WeakSet[Any]] = defaultdict(weakref.WeakSet)
         self.condition = threading.Condition(lock)
         self._change_callbacks: Set[Callable[[], None]] = set()
+        
+        # Storage related properties
+        self._storage = storage
+        self._server_id = server_id
+        self._db_num = db_num
+        self._dirty = False
+        
+        # Load data if storage is available
+        if self._storage and self._server_id is not None and self._db_num is not None:
+            self._dict = self._storage.load(self._server_id, self._db_num)
+
+    def _persist_if_needed(self):
+        """Save database to storage if it's dirty"""
+        if self._storage and self._server_id is not None and self._db_num is not None:
+            self._storage.save(self._server_id, self._db_num, self._dict)
+            self._dirty = False
 
     def swap(self, other: "Database") -> None:
         self._dict, other._dict = other._dict, self._dict
         self.time, other.time = other.time, self.time
+        self._dirty = True
+        self._persist_if_needed()
 
     def notify_watch(self, key: bytes) -> None:
         for sock in self._watches.get(key, set()):
@@ -165,6 +183,8 @@ class Database(MutableMapping):  # type: ignore
         for key in self:
             self.notify_watch(key)
         self._dict.clear()
+        self._dirty = True
+        self._persist_if_needed()
 
     def expired(self, item: Any) -> bool:
         return item.expireat is not None and item.expireat < self.time
@@ -179,14 +199,20 @@ class Database(MutableMapping):  # type: ignore
         item = self._dict[key]
         if self.expired(item):
             del self._dict[key]
+            self._dirty = True
+            self._persist_if_needed()
             raise KeyError(key)
         return item
 
     def __setitem__(self, key: bytes, value: Any) -> None:
         self._dict[key] = value
+        self._dirty = True
+        self._persist_if_needed()
 
     def __delitem__(self, key: bytes) -> None:
         del self._dict[key]
+        self._dirty = True
+        self._persist_if_needed()
 
     def __iter__(self) -> Iterator[bytes]:
         self._remove_expired()

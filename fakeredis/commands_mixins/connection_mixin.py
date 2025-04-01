@@ -34,8 +34,12 @@ class ConnectionCommandsMixin:
 
     @command(name="SELECT", fixed=(DbIndex,))
     def select(self, index: DbIndex) -> SimpleString:
-        self._db = self._server.dbs[index]
-        self._db_num = index  # type: ignore
+        return self._select(index)
+
+    def _select(self, index: int) -> SimpleString:
+        """Select the DB with the specified index"""
+        self._db_num = index
+        self._db = self._server.get_db(index)
         return OK
 
     @command(name="CLIENT SETINFO", fixed=(bytes, bytes), repeat=())

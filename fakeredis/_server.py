@@ -4,6 +4,7 @@ import time
 import weakref
 from collections import defaultdict
 from typing import Dict, Tuple, Any, List, Optional, Union
+import uuid
 
 try:
     from typing import Literal
@@ -40,6 +41,22 @@ def _version_to_str(v: VersionType) -> str:
 
 class FakeServer:
     _servers_map: Dict[str, "FakeServer"] = dict()
+    _storage = None  # Global storage instance
+    _shared_server_id = None  # For persistence between instances
+    
+    @classmethod
+    def configure_storage(cls, storage_dir=None):
+        """
+        Configure storage for all FakeServer instances
+        
+        Args:
+            storage_dir: Directory to store JSON files, if None uses a temp directory
+        """
+        from fakeredis.storage.json_storage import JSONStorage
+        cls._storage = JSONStorage(storage_dir)
+        # Set a shared server ID for persistence if not already set
+        if cls._shared_server_id is None:
+            cls._shared_server_id = str(uuid.uuid4())
 
     def __init__(
         self,
@@ -56,8 +73,14 @@ class FakeServer:
         - `requirepass`: The password required to authenticate to the server.
         - `aclfile`: The path to the ACL file.
         """
+        # Use shared server ID for persistent storage if available
+        if self._storage and self._shared_server_id:
+            self.server_id = self._shared_server_id
+        else:
+            # Generate a unique server ID if not using persistent storage
+            self.server_id = str(uuid.uuid4())
         self.lock = threading.Lock()
-        self.dbs: Dict[int, Database] = defaultdict(lambda: Database(self.lock))
+        self.dbs: Dict[int, Database] = {}  # Don't use defaultdict for persistence
         # Maps channel/pattern to a weak set of sockets
         self.subscribers: Dict[bytes, weakref.WeakSet[Any]] = defaultdict(weakref.WeakSet)
         self.psubscribers: Dict[bytes, weakref.WeakSet[Any]] = defaultdict(weakref.WeakSet)
@@ -72,6 +95,22 @@ class FakeServer:
         self.server_type: str = server_type
         self.config: Dict[bytes, bytes] = config or dict()
         self.acl: AccessControlList = AccessControlList()
+
+    def get_db(self, db_num: int) -> Database:
+        """Get or create a database with specified number"""
+        if db_num not in self.dbs:
+            self.dbs[db_num] = Database(
+                self.lock, 
+                storage=self._storage,
+                server_id=self.server_id,
+                db_num=db_num
+            )
+            
+            # Always initialize db 0 if we have storage enabled
+            if self._storage and db_num != 0 and 0 not in self.dbs:
+                self.get_db(0)  # Initialize db 0
+                
+        return self.dbs[db_num]
 
     @staticmethod
     def get_server(key: str, version: VersionType, server_type: ServerType) -> "FakeServer":
